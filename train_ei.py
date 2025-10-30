@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, List
 
 import dotenv
-import fire
+import pdb
 import torch
 import torch.nn as nn
 import wandb
@@ -52,7 +52,7 @@ class TrainConfigDebug:
     betas: tuple[float, float] = (0.9, 0.98)
     train_device: str = 'cpu'  # "cuda:0"
 
-    num_example: int = 32  # number of steps to save model
+    num_example: int = 32  # 设置无效，会自动在训练完1个epoch后保存模型
 
     # Log print:
     log_print_steps = 12  # default 12
@@ -63,6 +63,11 @@ class TrainConfigDebug:
     
     # random seed
     seed = 42
+    
+    # Expert Iteration
+    expert_iterations: int = 5
+    rollout_counts = 4  # number of samples per prompt
+    epoch_sft = 1
 
 
 @dataclass
@@ -73,15 +78,15 @@ class TrainConfig:
     data_path: str = "./data/gsm8k/train.jsonl"
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
 
-    batch_size: int = 8  # GPU memory >= 80G
+    batch_size: int = 8
     gradient_accumulation_steps: int = 8
-    training_steps: int = 512  # H20 1 hour
+    training_steps: int = 512
     mixed_precision_training: bool = True
     learning_rate: float = 5e-6
     betas: tuple[float, float] = (0.9, 0.98)
     train_device: str = "cuda:0"
 
-    num_example: int = 128  # number of steps to save model
+    num_example: int = 128  # 设置无效，会自动在训练完1个epoch后保存模型
 
     # Log print:
     log_print_steps = 12  # default 12
@@ -101,6 +106,7 @@ class EvaluateConfig:
     temperature: float = 1.0
     top_p: float = 1.0
     max_tokens: int = 1024
+    min_tokens: int = 4
 
 
 def sft_collate_fn(batch, tokenizer):
@@ -224,6 +230,7 @@ def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
         temperature=config.temperature,
         top_p=config.top_p,
         max_tokens=config.max_tokens,
+        min_tokens=config.min_tokens,
         stop=["</answer>"],
         include_stop_str_in_output=True,
     )
@@ -351,6 +358,7 @@ def train_sft_model(
                             temperature=eval_config.temperature,
                             top_p=eval_config.top_p,
                             max_tokens=eval_config.max_tokens,
+                            min_tokens=eval_config.min_tokens,
                             stop=["</answer>"],
                             include_stop_str_in_output=True,
                         ),
@@ -395,7 +403,7 @@ def main():
     dotenv.load_dotenv()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    train_config = TrainConfig()
+    train_config = TrainConfigDebug()  # TrainConfig
     eval_config = EvaluateConfig()
 
     # Login Wandb
@@ -404,37 +412,63 @@ def main():
 
     vllm = init_vllm(model_id=train_config.model_name, device=train_config.eval_device, seed=train_config.seed)
 
-    prompts, cot, answers = load_and_format_prompts(train_config.data_path, train_config.prompt_path)
+    all_prompts, all_cot, all_answers = load_and_format_prompts(train_config.data_path, train_config.prompt_path)
+    
+    train_config.num_example = len(all_prompts)
 
-    for num_samples in [len(prompts)]:
-        # ---------------------
-        # Load Model and tokenizer
-        # ---------------------
-        if torch.cuda.is_available():
+    # ---------------------
+    # Load Model and tokenizer
+    # ---------------------
+    if torch.cuda.is_available():
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=train_config.model_name,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="cpu",
+        ).to(train_config.train_device)
+        tokenizer = AutoTokenizer.from_pretrained(train_config.model_name)
+    else:
+        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             model = AutoModelForCausalLM.from_pretrained(
                 pretrained_model_name_or_path=train_config.model_name,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
+                torch_dtype=torch.float16,
                 device_map="cpu",
-            ).to(train_config.train_device)
+            )
             tokenizer = AutoTokenizer.from_pretrained(train_config.model_name)
-        else:
-            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                model = AutoModelForCausalLM.from_pretrained(
-                    pretrained_model_name_or_path=train_config.model_name,
-                    torch_dtype=torch.float16,
-                    device_map="cpu",
-                )
-                tokenizer = AutoTokenizer.from_pretrained(train_config.model_name)
-        print(f"[train] Tokenizer {train_config.model_name} loaded")
-        print(f"[train] Model {train_config.model_name} loaded on {train_config.train_device}")
+    print(f"[train] Tokenizer {train_config.model_name} loaded")
+    print(f"[train] Model {train_config.model_name} loaded on {train_config.train_device}")
+    
+    
+    # ---------------------
+    # filter out data by policy model
+    # ---------------------··
+    for ei in range(train_config.expert_iterations):
+        print(f"================ Expert Iteration {ei} ================")
+        train_prompts, train_cot, train_answers = [], [], []
+        
+        # 遍历dataset，使用vllm生成rollout_counts个samples
+        load_model_into_vllm_instance(model, vllm)
+        eval_sampling_params = SamplingParams(
+            temperature=eval_config.temperature,
+            top_p=eval_config.top_p,
+            max_tokens=eval_config.max_tokens,
+            min_tokens=eval_config.min_tokens,
+            n=eval_config.rollout_counts,  # rollout counts
+            stop=["</answer>"],
+            include_stop_str_in_output=True,
+        )
+        responses = get_response(vllm, all_prompts, eval_sampling_params)
+        
+        # 根据reward筛选数据
+        for di in range(len(all_prompts)):
+            for ri in range(train_config.rollout_counts):
+                eval_dict = r1_zero_reward_fn(responses[di * train_config.rollout_counts + ri], all_answers[di])
+                if eval_dict['reward'] >= 1.0:
+                    train_prompts.append(all_prompts[di])
+                    train_cot.append(responses[di * train_config.rollout_counts + ri])
+                    train_answers.append(all_answers[di])
 
-        train_config.num_example = num_samples
-
-        train_prompts = prompts[:num_samples]
-        train_cot = cot[:num_samples]
-        train_answers = answers[:num_samples]
-
+        # todo: 增加epochs，以及learning rate依据epoch调整
         train_sft_model(
             model,
             tokenizer,

@@ -1,6 +1,7 @@
-from unittest.mock import patch
-
+import pdb 
 import torch
+
+from unittest.mock import patch
 from vllm import LLM
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
@@ -13,11 +14,18 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
         a GPU separate from the policy.
     """
     if not torch.cuda.is_available():  # debug on mac
-        return LLM(
-            model=model_id,
-            #device=device,
-            dtype=torch.float16,
-        )
+        # pdb.set_trace()
+        try:
+            return LLM(                
+                model=model_id,
+                dtype=torch.float16,
+            )
+        except Exception:            
+            return LLM(
+                model=model_id,
+                dtype=torch.float16,
+                compilation_config=0,
+            )
     
     vllm_set_random_seed(seed)
 
@@ -46,8 +54,21 @@ def load_model_into_vllm_instance(model: torch.nn.Module, llm: LLM):
     model.eval()
     model.tie_weights()
     cpu_sd = {k: v.detach().to("cpu") for k, v in model.state_dict().items()}
+    # pdb.set_trace()
     llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    llm_model.load_weights(cpu_sd.items())
+
+    # Load weights without tracking autograd and prefer passing a mapping.
+    with torch.no_grad():
+        llm_model.load_weights(cpu_sd)
     model.train()
-    torch.cuda.synchronize(torch.device("cuda:1"))
+
+    # If CUDA is available, synchronize to ensure any asynchronous device
+    # transfers / kernels have finished. Avoid hardcoding a device index.
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            # best-effort: don't crash if synchronization fails for some reason
+            pass
+
     print_color("Model weights loaded into VLLM instance.")
