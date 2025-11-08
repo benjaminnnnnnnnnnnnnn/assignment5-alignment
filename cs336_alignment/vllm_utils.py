@@ -59,7 +59,7 @@ def load_model_into_vllm_instance(model: torch.nn.Module, llm: LLM):
 
     # Load weights without tracking autograd and prefer passing a mapping.
     with torch.no_grad():
-        llm_model.load_weights(cpu_sd)
+        llm_model.load_weights(cpu_sd.items())
     model.train()
 
     # If CUDA is available, synchronize to ensure any asynchronous device

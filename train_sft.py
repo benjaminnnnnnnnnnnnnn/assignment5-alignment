@@ -37,7 +37,7 @@ logging.getLogger("vllm").setLevel(logging.WARNING)
 
 
 @dataclass
-class TrainConfigDebug:
+class TrainConfigMac:
     experiment_name_base: str = "experiments"
     experiment_name: str = "sft-qwen2.5-gsm8k"
     model_name: str = "Qwen/Qwen2.5-Math-1.5B"
@@ -66,6 +66,35 @@ class TrainConfigDebug:
 
 
 @dataclass
+class TrainConfigDebug:
+    experiment_name_base: str = "experiments"
+    experiment_name: str = "sft-qwen2.5-gsm8k"
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    data_path: str = "./data/gsm8k/train.jsonl"
+    prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
+
+    batch_size: int = 1
+    gradient_accumulation_steps: int = 2  # default 16
+    training_steps: int = 512
+    mixed_precision_training: bool = False  # default True
+    learning_rate: float = 5e-6
+    betas: tuple[float, float] = (0.9, 0.98)
+    train_device: str = "cuda:0"
+
+    num_example: int = 32  # number of steps to save model
+
+    # Log print:
+    log_print_steps = 12  # default 12
+
+    # For evaluation
+    eval_device: str = "cuda:0"
+    eval_interval_steps: int = 16  # default 32
+    
+    # random seed
+    seed = 42
+
+
+@dataclass
 class TrainConfig:
     experiment_name_base: str = "experiments"
     experiment_name: str = "sft-qwen2.5-gsm8k"
@@ -75,7 +104,7 @@ class TrainConfig:
 
     batch_size: int = 8  # GPU memory >= 80G
     gradient_accumulation_steps: int = 8
-    training_steps: int = 512  # H20 1 hour
+    training_steps: int = 1024  # H20 1 hour
     mixed_precision_training: bool = True
     learning_rate: float = 5e-6
     betas: tuple[float, float] = (0.9, 0.98)
@@ -84,11 +113,11 @@ class TrainConfig:
     num_example: int = 128  # number of steps to save model
 
     # Log print:
-    log_print_steps = 12  # default 12
+    log_print_steps = 64
 
     # For evaluation
     eval_device: str = "cuda:1"
-    eval_interval_steps: int = 32
+    eval_interval_steps: int = 128
     
     # random seed
     seed = 42
@@ -96,7 +125,7 @@ class TrainConfig:
 
 @dataclass
 class EvaluateConfig:
-    data_path: str = "./data/gsm8k/test_samples.jsonl"
+    data_path: str = "./data/gsm8k/test.jsonl"
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
     temperature: float = 1.0
     top_p: float = 1.0
@@ -232,6 +261,7 @@ def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
 
     wandb.log(
         {
+            "eval/count": results["count"],
             "eval/correct": results["correct"],
             "eval/answer_wrong": results["answer_wrong"],
             "eval/format_wrong": results["format_wrong"],
@@ -339,7 +369,7 @@ def train_sft_model(
                 batch_loss = 0
                 cur_step += 1
 
-                if (cur_step + 1) % train_config.log_print_steps == 0 and evaluate:
+                if cur_step % train_config.log_print_steps == 0 and evaluate:
                     load_model_into_vllm_instance(model, vllm)
                     log_generate(
                         vllm,
@@ -358,7 +388,7 @@ def train_sft_model(
                         num_example=3,
                     )
 
-                if (cur_step + 1) % train_config.eval_interval_steps == 0 and evaluate:
+                if cur_step % train_config.eval_interval_steps == 0 and evaluate:
                     print(
                         f"[train] Step {cur_step}: saving model at {train_config.experiment_name}_{train_config.num_example}"
                     )

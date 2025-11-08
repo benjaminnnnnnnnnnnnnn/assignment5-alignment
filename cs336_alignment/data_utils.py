@@ -1,5 +1,4 @@
 import json
-
 import regex as re
 
 
@@ -66,7 +65,8 @@ def wrap_prompt(text: str, prompt_path: str):
     return prompt.format(question=text)
 
 
-def load_and_format_prompts(data_path: str, prompt_path: str) -> tuple[list[str], list[str], list[str]]:
+def load_and_format_prompts(data_path: str, prompt_path: str, dataset: str = "gsm8k") -> tuple[list[str], list[str], list[str]]:
+    assert dataset in ["math", "mmlu", "gsm8k", "alpaca", "safety"], "Unsupported dataset"
     with open(prompt_path, "r") as file:
         prompt = file.read()
 
@@ -74,11 +74,50 @@ def load_and_format_prompts(data_path: str, prompt_path: str) -> tuple[list[str]
     cot = []
     answers = []
     with open(data_path, "r") as file:
+        if dataset == "mmlu":
+            mmlu_format_data = {
+                "question": "",
+                "answer": "",
+            }
+            opt_re = re.compile(r",[A-D]\s")
+            subject = data_path.split('/')[-1].replace('.csv', '')
+            
         for line in file:
             data = json.loads(line)
-            prompts.append(prompt.format(question=data["question"]))
-            cot.append(convert_cot_to_think_answer(data["answer"]))
-            answers.append(extract_gsm8k_answer(data["answer"]))
+            if dataset == "mmlu":
+                matches = opt_re.findall(line)
+                if not matches:
+                    mmlu_format_data["question"] += line
+                else:
+                    splits = line.split(',')
+                    question_tail = ",".join(splits[:-5])
+                    mmlu_format_data["question"] += question_tail
+                    mmlu_format_data["answer"] = splits[-1]
+                    prompts.append(prompt.format(
+                        subject=subject,
+                        question=mmlu_format_data["question"],
+                        option_A=splits[-5],
+                        option_B=splits[-4],
+                        option_C=splits[-3],
+                        option_D=splits[-2],
+                    ))
+                    cot.append(f"The correct answer is {splits[-1]}")
+                    answers.append(mmlu_format_data["answer"])
+
+            # elif dataset == "alpaca":
+            #     prompts.append(prompt.format(question=data["instruction"]))
+            #     cot.append(data["output"])
+            #     answers.append(data["output"])                     
+                
+            elif dataset == "gsm8k":
+                prompts.append(prompt.format(instruction=data["question"]))
+                cot.append(data["answer"])
+                answers.append(parse_response_gsm8k(data["answer"]))     
+                
+            else:  # r1_zero_prompt, also for gs8mk because of invalid MATH dataset
+                prompts.append(prompt.format(question=data["question"]))
+                cot.append(convert_cot_to_think_answer(data["answer"]))
+                answers.append(extract_gsm8k_answer(data["answer"]))
 
     return prompts, cot, answers
 
@@ -90,3 +129,29 @@ def load_json_to_list(file_path: str) -> list[dict]:
             data_list.append(json.loads(line.strip()))
 
     return data_list
+
+
+##############################################################################
+### CS336 Assignment 5 Supplement (alignment): Instruction Tuning and RLHF ###
+##############################################################################
+def parse_response_mmlu(mmlu_example: dict, response: str) -> str:
+    opt_re = re.compile(r" [A-D][\,,\.,\s, ]?")
+    matches = opt_re.findall(response)
+    if not matches:
+        return None
+    return  matches[-1][1]
+
+def parse_response_gsm8k(response: str) -> str | None:
+    # find all candidate numbers (allow sign, digits, commas and dots), pick the last one
+    num_re = re.compile(r"[-+]?[0-9][0-9,\.]*")
+    matches = num_re.findall(response)
+    if not matches:
+        return None
+    # clean commas from the chosen match
+    ans = matches[-1].replace(",", "")
+    if ans[-1] == ".":
+        ans = ans[:-1]
+    return ans
+
+
+

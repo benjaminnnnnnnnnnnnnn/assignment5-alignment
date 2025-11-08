@@ -21,7 +21,7 @@ def safe_slug(s: str) -> str:
 
 def get_run_name(prefix: str, config):
     date = time.strftime("%m%d-%H%M%S")
-    return f"{prefix}-{safe_slug(config.model_name)}-{config.num_example}-{config.data_path.split('/')[2]}-{date}"
+    return f"{prefix}-{safe_slug(config.model_name)}-{config.data_path.split('/')[2]}-{date}"
 
 
 def save_model_and_tokenizer(model, tokenizer, config):

@@ -1047,8 +1047,13 @@ def r1_zero_reward_fn(response, ground_truth, fast=True):
         }
 
 
-def question_only_reward_fn(response, ground_truth, fast=True):
-    model_answer = extract_answer(response)
+def question_only_reward_fn(response, ground_truth, fast=True, dataset="math"):
+    assert dataset in ["math", "mmlu", "gsm8k", "alpaca", "safety"], "Unsupported dataset"
+    if dataset == "gsm8k":
+        from cs336_alignment.data_utils import parse_response_gsm8k
+        model_answer = parse_response_gsm8k(response)
+    else:
+        model_answer = extract_answer(response)
     if model_answer is None:
         # Cannot even parse anything.
         return {
@@ -1078,3 +1083,5 @@ def question_only_reward_fn(response, ground_truth, fast=True):
             "answer_reward": 0.0,
             "reward": 0.0
         }
+
+

@@ -20,7 +20,7 @@ from vllm import LLM, SamplingParams
 
 from cs336_alignment.data_utils import extract_reference_answer, load_and_format_prompts
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from cs336_alignment.evaluate import get_response
+from cs336_alignment.evaluate import get_response, get_all_response
 from cs336_alignment.sft_utils import (
     get_response_log_probs,
     sft_microbatch_train_step,
@@ -37,7 +37,7 @@ logging.getLogger("vllm").setLevel(logging.WARNING)
 
 
 @dataclass
-class TrainConfigDebug:
+class TrainConfigMac:
     experiment_name_base: str = "experiments"
     experiment_name: str = "sft-qwen2.5-gsm8k"
     model_name: str = "Qwen/Qwen2.5-Math-1.5B"
@@ -52,8 +52,6 @@ class TrainConfigDebug:
     betas: tuple[float, float] = (0.9, 0.98)
     train_device: str = 'cpu'  # "cuda:0"
 
-    num_example: int = 32  # 设置无效，会自动在训练完1个epoch后保存模型
-
     # Log print:
     log_print_steps = 12  # default 12
 
@@ -67,13 +65,46 @@ class TrainConfigDebug:
     # Expert Iteration
     expert_iterations: int = 5
     rollout_counts = 4  # number of samples per prompt
-    epoch_sft = 1
+    sft_epochs_per_ei = 1
+    
+    
+@dataclass
+class TrainConfigDebug:
+    experiment_name_base: str = "experiments"
+    experiment_name: str = "EI-qwen2.5-gsm8k-debug"
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    data_path: str = "./data/gsm8k/train.jsonl"
+    prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
+
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 2  # default 16
+    training_steps: int = 32
+    mixed_precision_training: bool = False  # default True
+    learning_rate: float = 5e-6
+    betas: tuple[float, float] = (0.9, 0.98)
+    train_device: str = "cuda:0"
+
+    # Log print:
+    log_print_steps = 4  # default 12
+
+    # For evaluation
+    eval_device: str = "cuda:0"
+    eval_interval_steps: int = 16  # default 32
+    
+    # random seed
+    seed = 42
+    
+    # Expert Iteration
+    expert_iterations: int = 5
+    rollout_counts = 4  # number of samples per prompt
+    sft_epochs_per_ei = 2
+    num_ei_samples = 100
 
 
 @dataclass
 class TrainConfig:
     experiment_name_base: str = "experiments"
-    experiment_name: str = "sft-qwen2.5-gsm8k"
+    experiment_name: str = "EI-qwen2.5-gsm8k_num=2k_G=8_ep=2"
     model_name: str = "Qwen/Qwen2.5-Math-1.5B"
     data_path: str = "./data/gsm8k/train.jsonl"
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
@@ -86,22 +117,36 @@ class TrainConfig:
     betas: tuple[float, float] = (0.9, 0.98)
     train_device: str = "cuda:0"
 
-    num_example: int = 128  # 设置无效，会自动在训练完1个epoch后保存模型
-
     # Log print:
-    log_print_steps = 12  # default 12
+    log_print_steps = 16
 
     # For evaluation
     eval_device: str = "cuda:1"
-    eval_interval_steps: int = 32
+    eval_interval_steps: int = 64
     
     # random seed
     seed = 42
+    
+    # Expert Iteration
+    expert_iterations: int = 5
+    rollout_counts = 8  # number of samples per prompt
+    sft_epochs_per_ei = 2
+    num_ei_samples = 2000
+    
+    
+@dataclass
+class EvaluateConfigDebug:
+    data_path: str = "./data/gsm8k/test_samples.jsonl"
+    prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
+    temperature: float = 1.0
+    top_p: float = 1.0
+    max_tokens: int = 512
+    min_tokens: int = 4
 
 
 @dataclass
 class EvaluateConfig:
-    data_path: str = "./data/gsm8k/test_samples.jsonl"
+    data_path: str = "./data/gsm8k/test.jsonl"
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt"
     temperature: float = 1.0
     top_p: float = 1.0
@@ -173,6 +218,7 @@ def log_generate(
     responses = get_response(vllm_model, sampled_prompts, eval_sampling_params)
 
     for i in range(num_example):
+        print(f"======= Step: {cur_step}; Example {i} =======")
         response = responses[i]
         answer = sampled_answers[i]
         prompt = sampled_prompts[i]
@@ -190,7 +236,6 @@ def log_generate(
             **reward_dict,
         }
 
-        print(f"======= Step: {cur_step}; Example {i} =======")
         # print_formatted_dict(info_dict)
         print_rich_dict(info_dict)
         print("==============================================\n")
@@ -223,7 +268,7 @@ def evaluate_vllm(
     return overview
 
 
-def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
+def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int, global_pre_step: int):
     prompts, cot, answers = load_and_format_prompts(config.data_path, config.prompt_path)
 
     sampling_params = SamplingParams(
@@ -239,10 +284,11 @@ def evaluate_sft_model(config: EvaluateConfig, vllm: LLM, eval_step: int):
 
     wandb.log(
         {
+            "eval/count": results["count"],
             "eval/correct": results["correct"],
             "eval/answer_wrong": results["answer_wrong"],
             "eval/format_wrong": results["format_wrong"],
-            "eval_step": eval_step,
+            "eval_step": eval_step + global_pre_step,
         }
     )
 
@@ -257,22 +303,8 @@ def train_sft_model(
     train_answers,
     vllm: LLM,
     evaluate: bool = True,
+    global_pre_step: int = 0,
 ):
-    wandb.init(
-        entity=os.getenv("WANDB_ENTITY"),
-        project="cs336-alignment-sft",
-        config={
-            "train": asdict(train_config),
-            "eval": asdict(eval_config),
-        },
-        name=get_run_name("sft", train_config),
-        reinit=True,
-    )
-    wandb.define_metric("train_step")
-    wandb.define_metric("eval_step")
-    wandb.define_metric("train/*", step_metric="train_step")
-    wandb.define_metric("eval/*", step_metric="eval_step")
-
     # Data Preparation
     # ---------------------
     dataset = SFTDataset(train_prompts, train_cot, train_answers)
@@ -332,21 +364,21 @@ def train_sft_model(
                 optimizer.zero_grad()
 
                 print(
-                    f"[train] Step {cur_step} | Loss: {batch_loss / train_config.gradient_accumulation_steps:.4f} | LR: {adj_lr:.6f}"
+                    f"[train] Step {cur_step} | Loss: {batch_loss / train_config.gradient_accumulation_steps:.4f} | LR: {adj_lr:.8f}"
                 )
 
                 wandb.log(
                     {
                         "train/loss": batch_loss / train_config.gradient_accumulation_steps,
                         "train/lr": adj_lr,
-                        "train_step": cur_step,
+                        "train_step": cur_step + global_pre_step,
                     }
                 )
 
                 batch_loss = 0
                 cur_step += 1
 
-                if (cur_step + 1) % train_config.log_print_steps == 0 and evaluate:
+                if cur_step % train_config.log_print_steps == 0 and evaluate:
                     load_model_into_vllm_instance(model, vllm)
                     log_generate(
                         vllm,
@@ -366,18 +398,6 @@ def train_sft_model(
                         num_example=3,
                     )
 
-                if (cur_step + 1) % train_config.eval_interval_steps == 0 and evaluate:
-                    print(
-                        f"[train] Step {cur_step}: saving model at {train_config.experiment_name}_{train_config.num_example}"
-                    )
-                    save_model_and_tokenizer(model, tokenizer, train_config)
-
-                    # Run evaluatoin
-                    print(f"[eval] at step {cur_step}")
-                    load_model_into_vllm_instance(model, vllm)
-                    evaluate_sft_model(eval_config, vllm, eval_step=cur_step)
-                    print(f"[eval] Evaluation completed for step {cur_step}")
-
                 if cur_step >= train_config.training_steps:
                     break
 
@@ -386,8 +406,13 @@ def train_sft_model(
 
     save_model_and_tokenizer(model, tokenizer, train_config)
     print(f"[train] Training finished at step {cur_step}")
+    
+    # Run evaluatoin
+    print(f"\n[eval] at step {cur_step}")
+    load_model_into_vllm_instance(model, vllm)
+    evaluate_sft_model(eval_config, vllm, eval_step=cur_step, global_pre_step=global_pre_step)
+    print(f"[eval] Evaluation completed for step {cur_step}")
 
-    wandb.finish()
     return model
 
 
@@ -399,22 +424,44 @@ def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
     return imports
 
 
-def main():
+def main(debug_mode):
     dotenv.load_dotenv()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    train_config = TrainConfigDebug()  # TrainConfig
-    eval_config = EvaluateConfig()
+    if debug_mode:
+        train_config = TrainConfigDebug()
+        eval_config = EvaluateConfigDebug()
+    else:
+        train_config = TrainConfig()
+        eval_config = EvaluateConfig()
 
     # Login Wandb
     api_key = os.getenv("WANDB_API_KEY")
     wandb.login(key=api_key)
+    
+    wandb.init(
+        entity=os.getenv("WANDB_ENTITY"),
+        project="cs336-alignment-sft",
+        config={
+            "train": asdict(train_config),
+            "eval": asdict(eval_config),
+        },
+        name=get_run_name("EI", train_config),
+        reinit=True,
+    )
+    wandb.define_metric("train_step")
+    wandb.define_metric("eval_step")
+    wandb.define_metric("train/*", step_metric="train_step")
+    wandb.define_metric("eval/*", step_metric="eval_step")
 
-    vllm = init_vllm(model_id=train_config.model_name, device=train_config.eval_device, seed=train_config.seed)
+    vllm = init_vllm(
+        model_id=train_config.model_name, 
+        device=train_config.eval_device, 
+        seed=train_config.seed, 
+        gpu_memory_utilization = 0.5 if debug_mode else 0.9,
+    )
 
     all_prompts, all_cot, all_answers = load_and_format_prompts(train_config.data_path, train_config.prompt_path)
-    
-    train_config.num_example = len(all_prompts)
 
     # ---------------------
     # Load Model and tokenizer
@@ -438,37 +485,49 @@ def main():
     print(f"[train] Tokenizer {train_config.model_name} loaded")
     print(f"[train] Model {train_config.model_name} loaded on {train_config.train_device}")
     
-    
-    # ---------------------
-    # filter out data by policy model
-    # ---------------------··
+    global_pre_step = 0
     for ei in range(train_config.expert_iterations):
-        print(f"================ Expert Iteration {ei} ================")
+        print("\n====================================================================")
+        print(f"======================= Expert Iteration {ei} =======================")
+        print("====================================================================\n")
+        # 随机选取部分数据进行筛选
         train_prompts, train_cot, train_answers = [], [], []
+        random_indices = random.sample(range(len(all_prompts)), k=train_config.num_ei_samples)
+        sampled_prompts = [all_prompts[i] for i in random_indices]
+        sampled_cot = [all_cot[i] for i in random_indices]
+        sampled_answers = [all_answers[i] for i in random_indices]
         
-        # 遍历dataset，使用vllm生成rollout_counts个samples
+        # 使用vllm生成rollout_counts个samples
         load_model_into_vllm_instance(model, vllm)
         eval_sampling_params = SamplingParams(
             temperature=eval_config.temperature,
             top_p=eval_config.top_p,
             max_tokens=eval_config.max_tokens,
             min_tokens=eval_config.min_tokens,
-            n=eval_config.rollout_counts,  # rollout counts
+            n=train_config.rollout_counts,  # rollout counts
             stop=["</answer>"],
             include_stop_str_in_output=True,
         )
-        responses = get_response(vllm, all_prompts, eval_sampling_params)
+        print("[Expert Iteration] Generating responses for filtering...")
+        responses = get_all_response(vllm, sampled_prompts, eval_sampling_params)
         
         # 根据reward筛选数据
-        for di in range(len(all_prompts)):
+        for di in range(train_config.num_ei_samples):
             for ri in range(train_config.rollout_counts):
-                eval_dict = r1_zero_reward_fn(responses[di * train_config.rollout_counts + ri], all_answers[di])
+                eval_dict = r1_zero_reward_fn(responses[di * train_config.rollout_counts + ri], sampled_answers[di])
                 if eval_dict['reward'] >= 1.0:
-                    train_prompts.append(all_prompts[di])
+                    train_prompts.append(sampled_prompts[di])
                     train_cot.append(responses[di * train_config.rollout_counts + ri])
-                    train_answers.append(all_answers[di])
+                    train_answers.append(sampled_answers[di])
 
-        # todo: 增加epochs，以及learning rate依据epoch调整
+        # 动态调整train_config.training_steps，以控制sft训练epochs
+        train_config.training_steps = len(train_prompts) * train_config.sft_epochs_per_ei // (train_config.batch_size * train_config.gradient_accumulation_steps) + 1
+        print("ei/num_filtered_data:", len(train_prompts))
+        print("ei/training_steps_per_ei:", train_config.training_steps)
+        wandb.log({
+            "ei/num_filtered_data": len(train_prompts),
+            "ei/training_steps_per_ei": train_config.training_steps,
+        })
         train_sft_model(
             model,
             tokenizer,
@@ -478,10 +537,14 @@ def main():
             train_cot=train_cot,
             train_answers=train_answers,
             vllm=vllm,
+            global_pre_step=global_pre_step,
         )
+        
+        global_pre_step += train_config.training_steps
 
     wandb.finish()
 
 
 if __name__ == "__main__":
-    main()
+    main(debug_mode=False)
+
