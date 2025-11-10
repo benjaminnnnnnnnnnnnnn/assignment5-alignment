@@ -83,31 +83,35 @@ def dump_vllm_outputs(
                 prompts.append(data["instruction"])
     
         responses = get_response(vllm_model, prompts, eval_sampling_params)
-        for response, data in zip(reponses, datasets):
+        for response, data in zip(responses, datasets):
             data["output"] = response
             data["generator"] = "llama-3.1-8b-base"
 
     elif dataset == "safety":
         with open(data_path, "r") as file:
-            for line in file[1:]:
+            for i, line in enumerate(file):
+                if i == 0:
+                    continue  # skip header
                 prompts.append(line.split(',')[-1])
     
         responses = get_response(vllm_model, prompts, eval_sampling_params)
         
-        for prompt, response in zip(prompts, reponses):
+        for prompt, response in zip(prompts, responses):
             data = {
                 "prompts_final": prompt,
                 "output": response,
             }
             datasets.append(data)
     
-    with open(save_path, 'w') as fout:
-        json.dump(datasets, fout)
-        
+    with open(save_path, 'w', encoding="utf-8") as fout:
+        for d in datasets:
+            json.dump(d, fout)
+            fout.write("\n")
+
 
 def main(
-    dataset: str = "gsm8k",
-    model_name: str = "Qwen/Qwen2.5-Math-1.5B",
+    dataset: str = "safety",
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
     data_path: str = "./data/gsm8k/test_samples.jsonl",
     prompt_path: str = "./cs336_alignment/prompts/r1_zero.prompt",
     temperature: float = 0.0,
@@ -132,7 +136,8 @@ def main(
         
     elif dataset == "mmlu":
         model_name = "Llama/Llama-3.1-8B"
-        data_path = "data/mmlu/dev/high_school_world_history_dev.csv"
+        data_path = "data/mmlu/test/high_school_world_history_test.csv"
+        # data_path = "data/mmlu/dev/high_school_world_history_dev.csv"
         prompt_path = "cs336_alignment/prompts/mmlu.prompt"
         
         sampling_params = SamplingParams(
@@ -145,10 +150,10 @@ def main(
         reward_func = lambda response, ground_truth: question_only_reward_fn(response, ground_truth, dataset=dataset)
 
     elif dataset == "alpaca":
-        model_name = "Llama/Llama-3.1-8B"
-        data_path = "assignment5-alignment/data/alpaca_eval/alpaca_eval.jsonl"
+        # model_name = "Llama/Llama-3.1-8B"
+        data_path = "data/alpaca_eval/alpaca_eval.jsonl"
         prompt_path = "cs336_alignment/prompts/question_only.prompt"
-        save_path = "assignment5-alignment/data/alpaca_eval/alpaca_eval_llama_8B.jsonl"
+        save_path = "data/alpaca_eval/alpaca_eval_llama_8B.jsonl"
 
         sampling_params = SamplingParams(
             temperature=temperature,
@@ -159,10 +164,10 @@ def main(
         )
 
     elif dataset == "safety":
-        model_name = "Llama/Llama-3.1-8B"
-        data_path = "assignment5-alignment/data/simple_safety_tests/simple_safety_tests.csv"
+        # model_name = "Llama/Llama-3.1-8B"
+        data_path = "data/simple_safety_tests/simple_safety_tests.csv"
         prompt_path = "cs336_alignment/prompts/question_only.prompt"
-        save_path = "assignment5-alignment/data/simple_safety_tests/safety_tests_llama_8B.csv"
+        save_path = "data/simple_safety_tests/safety_tests_qwen_0.5B.csv"
 
         sampling_params = SamplingParams(
             temperature=temperature,
@@ -188,7 +193,7 @@ def main(
         model=model_name,
         device="cuda:0",
         dtype=torch.bfloat16,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.95,
     )
 
     if dataset in ["alpaca", "safety"]:

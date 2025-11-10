@@ -1052,6 +1052,9 @@ def question_only_reward_fn(response, ground_truth, fast=True, dataset="math"):
     if dataset == "gsm8k":
         from cs336_alignment.data_utils import parse_response_gsm8k
         model_answer = parse_response_gsm8k(response)
+    elif dataset == "mmlu":
+        from cs336_alignment.data_utils import parse_response_mmlu
+        model_answer = parse_response_mmlu(response)
     else:
         model_answer = extract_answer(response)
     if model_answer is None:

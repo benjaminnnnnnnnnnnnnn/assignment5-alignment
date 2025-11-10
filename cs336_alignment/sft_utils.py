@@ -71,6 +71,8 @@ def get_response_log_probs(
     """
 
     # (B, S, V)
+    input_ids = input_ids.to(model.device)
+    labels = labels.to(model.device)
     logits = model(input_ids).logits
 
     # First way

@@ -81,18 +81,17 @@ def load_and_format_prompts(data_path: str, prompt_path: str, dataset: str = "gs
             }
             opt_re = re.compile(r",[A-D]\s")
             subject = data_path.split('/')[-1].replace('.csv', '')
-            
+
         for line in file:
-            data = json.loads(line)
             if dataset == "mmlu":
                 matches = opt_re.findall(line)
                 if not matches:
-                    mmlu_format_data["question"] += line
+                    mmlu_format_data["question"] += line.strip()
                 else:
                     splits = line.split(',')
                     question_tail = ",".join(splits[:-5])
                     mmlu_format_data["question"] += question_tail
-                    mmlu_format_data["answer"] = splits[-1]
+                    mmlu_format_data["answer"] = splits[-1].strip()
                     prompts.append(prompt.format(
                         subject=subject,
                         question=mmlu_format_data["question"],
@@ -101,20 +100,22 @@ def load_and_format_prompts(data_path: str, prompt_path: str, dataset: str = "gs
                         option_C=splits[-3],
                         option_D=splits[-2],
                     ))
-                    cot.append(f"The correct answer is {splits[-1]}")
+                    cot.append(f"The correct answer is {mmlu_format_data["answer"]}")
                     answers.append(mmlu_format_data["answer"])
 
             # elif dataset == "alpaca":
             #     prompts.append(prompt.format(question=data["instruction"]))
             #     cot.append(data["output"])
             #     answers.append(data["output"])                     
-                
+
             elif dataset == "gsm8k":
+                data = json.loads(line)
                 prompts.append(prompt.format(instruction=data["question"]))
                 cot.append(data["answer"])
                 answers.append(parse_response_gsm8k(data["answer"]))     
                 
             else:  # r1_zero_prompt, also for gs8mk because of invalid MATH dataset
+                data = json.loads(line)
                 prompts.append(prompt.format(question=data["question"]))
                 cot.append(convert_cot_to_think_answer(data["answer"]))
                 answers.append(extract_gsm8k_answer(data["answer"]))
@@ -134,7 +135,10 @@ def load_json_to_list(file_path: str) -> list[dict]:
 ##############################################################################
 ### CS336 Assignment 5 Supplement (alignment): Instruction Tuning and RLHF ###
 ##############################################################################
-def parse_response_mmlu(mmlu_example: dict, response: str) -> str:
+def parse_response_mmlu(response: str) -> str:
+    if response and response[0] in ['A', 'B', 'C', 'D']:
+        return response[0]
+    
     opt_re = re.compile(r" [A-D][\,,\.,\s, ]?")
     matches = opt_re.findall(response)
     if not matches:
